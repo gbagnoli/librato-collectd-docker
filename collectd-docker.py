@@ -52,7 +52,7 @@ DEBUG = True if os.environ.get('DEBUG', None) else False
 DOCKER_HOST = os.environ.get('DOCKER_HOST', 'unix:///var/run/docker.sock')
 
 # Print names instead of containers id
-CONTAINER_NAMES = True if os.environ.get('CONTAINER_NAMES', None) else False
+CONTAINER_NAMES = False if os.environ.get('CONTAINER_IDS', None) else True
 NAMERE = re.compile('[\W_]+')
 
 if DOCKER_HOST.startswith('unix://'):
@@ -250,6 +250,7 @@ def collectd_output(metric, value):
     fmt_metric = metric.replace('.', '/')
     return "PUTVAL \"%s/%s\" interval=%s N:%s" % (HOSTNAME, fmt_metric,
                                                   INTERVAL, value)
+
 
 try:
     while True:

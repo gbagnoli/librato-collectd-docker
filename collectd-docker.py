@@ -17,7 +17,7 @@ __license__ = """\
     OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.\
         """
 
-import urllib2
+import urllib
 import requests
 import json
 import time
@@ -29,30 +29,37 @@ import re
 # we should first try to grab stats via Docker's API socket
 # (/var/run/docker.sock) and fallback to getting them from
 # the sysfs cgroup directories
-# 
+#
 # https://docs.docker.com/reference/api/docker_remote_api_v1.18/#get-container-stats-based-on-resource-usage
-# 
+#
 # There are a couple blkio stats that may be useful but they're
 # only exposed by sysfs, not the Docker API
-# 
+#
 # blkio.throttle.io_service_bytes
 # blkio.throttle.io_serviced
-# 
+#
 # https://www.kernel.org/doc/Documentation/cgroups/blkio-controller.txt
 
-try:
-    HOSTNAME = os.environ['COLLECTD_HOSTNAME']
-except:
-    HOSTNAME = 'localhost'
-try:
-    INTERVAL = os.environ['COLLECTD_INTERVAL']
-except:
-    INTERVAL = 60
-try:
-    if os.environ['DEBUG']:
-        DEBUG = True
-except:
-    DEBUG = False
+HOSTNAME = os.environ.get('COLLECTD_HOSTNAME', 'localhost')
+INTERVAL = os.environ.get('COLLECTD_INTERVAL', 60)
+DEBUG = True if os.environ.get('DEBUG', None) else False
+
+# This should be either
+#  http://<ip>:<port>
+# or
+#  unix:///path/to/file
+# Defaults to the unix socket
+DOCKER_HOST = os.environ.get('DOCKER_HOST', 'unix:///var/run/docker.sock')
+
+# Print names instead of containers id
+CONTAINER_NAMES = True if os.environ.get('CONTAINER_NAMES', None) else False
+NAMERE = re.compile('[\W_]+')
+
+if DOCKER_HOST.startswith('unix://'):
+    import requests_unixsocket
+    requests_unixsocket.monkeypatch()
+    DOCKER_HOST = "http+unix://{0}".format(
+        urllib.quote(DOCKER_HOST.replace("unix://", ""), safe=''))
 
 METRICS_MAP = {
     # This dict represents a map of the original normalized metric path
@@ -158,10 +165,10 @@ METRICS_MAP = {
 WHITELIST_STATS = {
     'docker-librato.\w+.cpu_stats.*',
     'docker-librato.\w+.memory_stats.*',
-    'docker-librato.\w+.network.*',
-    #'docker-librato.\w+.blkio_stats.io_service_bytes_recursive.\d+.value',
-    #'docker-librato.\w+.blkio_stats.io_serviced_recursive.\d+.value',
-    #'docker-librato.\w+.*',
+    # 'docker-librato.\w+.network.*',
+    # 'docker-librato.\w+.blkio_stats.io_service_bytes_recursive.\d+.value',
+    # 'docker-librato.\w+.blkio_stats.io_serviced_recursive.\d+.value',
+    # 'docker-librato.\w+.*',
 }
 
 BLACKLIST_STATS = {
@@ -169,10 +176,13 @@ BLACKLIST_STATS = {
     'docker-librato.\w+.cpu_stats.cpu_usage.percpu_usage.*',
 }
 
+
 def log(str):
-    if DEBUG == True:
+    if DEBUG:
         ts = time.time()
-        print "%s: %s" % (datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S.%f'), str)
+        print "%s: %s" % (datetime.datetime.fromtimestamp(ts)
+                          .strftime('%Y-%m-%d %H:%M:%S.%f'), str)
+
 
 def flatten(structure, key="", path="", flattened=None):
     if flattened is None:
@@ -187,27 +197,42 @@ def flatten(structure, key="", path="", flattened=None):
             flatten(value, new_key, path + "." + key, flattened)
     return flattened
 
+
 def find_containers():
-    log('getting container ids')
-    r = requests.get('http://127.0.0.1:2375/containers/json')
-    log('done getting container ids')
+    r = requests.get('{0}/containers/json'.format(DOCKER_HOST))
     result = json.loads(r.text)
-    log('done translating result into json')
-    return [c['Id'] for c in result]
+    pairs = []
+    for c in result:
+        if CONTAINER_NAMES:
+            pairs.append((c['Id'], get_name(c['Id'])))
+        else:
+            pairs.append((c['Id'], None))
+
+    log("Found containers: %s" % (pairs))
+    return pairs
+
 
 def gather_stats(container_id):
-    log('getting container stats')
-    r = requests.get("http://127.0.0.1:2375/containers/%s/stats" % container_id, stream=True)
-    log('done getting container stats')
+    r = requests.get("{0}/containers/{1}/stats".format(DOCKER_HOST,
+                                                       container_id),
+                     stream=True)
     result = json.loads(r.raw.readline())
-    log('done translating result into json')
     return result
+
+
+def get_name(container_id):
+    r = requests.get('{0}/containers/{1}/json'.format(DOCKER_HOST,
+                                                      container_id))
+    name = json.loads(r.text)['Name'][1:]  # Skip initial / in name
+    return NAMERE.sub('_', name)
+
 
 def compile_regex(list):
     regexes = []
     for l in list:
         regexes.append(re.compile(l))
     return regexes
+
 
 def prettify_name(metric):
     prefix = '-'.join(metric.split('.')[0:2])
@@ -220,32 +245,39 @@ def prettify_name(metric):
     except:
         return "%s.%s" % (prefix, suffix)
 
+
 def collectd_output(metric, value):
     fmt_metric = metric.replace('.', '/')
-    return "PUTVAL \"%s/%s\" interval=%s N:%s" % (HOSTNAME, fmt_metric, INTERVAL, value)
+    return "PUTVAL \"%s/%s\" interval=%s N:%s" % (HOSTNAME, fmt_metric,
+                                                  INTERVAL, value)
 
-while True:
-    try:
+try:
+    while True:
         whitelist = compile_regex(WHITELIST_STATS)
         blacklist = compile_regex(BLACKLIST_STATS)
-        for id in find_containers():
+        for id, name in find_containers():
+            log("%s : %s" % (id, name))
+            key = name if CONTAINER_NAMES else id[0:12]
             try:
                 stats = gather_stats(id)
-                for i in flatten(stats, key=id[0:12], path='docker-librato').items():
+                for i in flatten(stats, key=key,
+                                 path='docker-librato').items():
                     blacklisted = False
                     for r in blacklist:
                         if r.match(i[0].encode('ascii')):
                             blacklisted = True
                             break
-                    if blacklisted == False:
+                    if not blacklisted:
                         for r in whitelist:
                             metric = i[0].encode('ascii')
                             if r.match(metric):
-                                print collectd_output(prettify_name(metric), i[1])
+                                print collectd_output(prettify_name(metric),
+                                                      i[1])
                                 break
             except:
                 sys.exit(1)
 
-    except KeyboardInterrupt:
-        sys.exit(1)
-    time.sleep(float(INTERVAL))
+        time.sleep(float(INTERVAL))
+
+except KeyboardInterrupt:
+    sys.exit(1)

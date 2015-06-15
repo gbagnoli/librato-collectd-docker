@@ -54,6 +54,7 @@ DOCKER_HOST = os.environ.get('DOCKER_HOST', 'unix:///var/run/docker.sock')
 # Print names instead of containers id
 CONTAINER_NAMES = False if os.environ.get('CONTAINER_IDS', None) else True
 NAMERE = re.compile('[\W_]+')
+NAMERE_INST = re.compile('_\d+$')
 
 if DOCKER_HOST.startswith('unix://'):
     import requests_unixsocket
@@ -81,6 +82,9 @@ METRICS_MAP = {
     # Units: nanoseconds
     'cpu_stats.cpu_usage.usage_in_usermode': {
         'name': 'cpu-user'
+    },
+    'cpu_stats.system_cpu_usage': {
+        'name': 'cpu-system'
     },
     # Number of periods when the container hit its throttling limit.
     'cpu_stats.throttling_data.throttled_periods': {
@@ -164,7 +168,11 @@ METRICS_MAP = {
 # White and Blacklisting happens before flattening
 WHITELIST_STATS = {
     'docker-librato.\w+.cpu_stats.*',
-    'docker-librato.\w+.memory_stats.*',
+    #'docker-librato.\w+.memory_stats.*',
+    'docker-librato.\w+.memory_stats.stats.cache',
+    'docker-librato.\w+.memory_stats.limit',
+    'docker-librato.\w+.memory_stats.max_usage',
+    'docker-librato.\w+.memory_stats.stats.rss',
     # 'docker-librato.\w+.network.*',
     # 'docker-librato.\w+.blkio_stats.io_service_bytes_recursive.\d+.value',
     # 'docker-librato.\w+.blkio_stats.io_serviced_recursive.\d+.value',
@@ -172,8 +180,14 @@ WHITELIST_STATS = {
 }
 
 BLACKLIST_STATS = {
+    'docker-librato.\w+.memory_stats.stats.rss_huge',
     'docker-librato.\w+.memory_stats.stats.total_*',
+    'docker-librato.\w+.cpu_stats.system_cpu_usage',
     'docker-librato.\w+.cpu_stats.cpu_usage.percpu_usage.*',
+    'docker-librato.\w+.cpu_stats.cpu_usage.percpu_usage.*',
+    'docker-librato.\w+.cpu_stats.throttling_data.throttled_periods',
+    'docker-librato.\w+.cpu_stats.throttling_data.periods',
+    'docker-librato.\w+.cpu_stats.throttling_data.throttled_time',
 }
 
 
@@ -224,7 +238,7 @@ def get_name(container_id):
     r = requests.get('{0}/containers/{1}/json'.format(DOCKER_HOST,
                                                       container_id))
     name = json.loads(r.text)['Name'][1:]  # Skip initial / in name
-    return NAMERE.sub('_', name)
+    return NAMERE_INST.sub('', NAMERE.sub('_', name))
 
 
 def compile_regex(list):
@@ -258,7 +272,7 @@ try:
         blacklist = compile_regex(BLACKLIST_STATS)
         for id, name in find_containers():
             log("%s : %s" % (id, name))
-            key = name if CONTAINER_NAMES else id[0:12]
+            key = name if name else id[0:12]
             try:
                 stats = gather_stats(id)
                 for i in flatten(stats, key=key,
@@ -275,6 +289,7 @@ try:
                                 print collectd_output(prettify_name(metric),
                                                       i[1])
                                 break
+
             except:
                 sys.exit(1)
 
